@@ -102,3 +102,57 @@ class TestForwardCommand:
 
             mock_sm.send_to_window.assert_called_once_with("@5", "/clear")
             mock_sm.clear_window_session.assert_called_once_with("@5")
+
+
+class TestForwardCommandCodex:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "cmd", ["/new", "/clear", "/NEW", "/clear@mybot", "/new foo"]
+    )
+    async def test_thread_replacing_commands_are_rejected(self, cmd):
+        """/new and /clear would desync the tracked Codex thread → reject."""
+        update = _make_update(cmd)
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._is_codex_bound_window", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.resolve_window_for_thread.return_value = "@5"
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            from ccbot.bot import forward_command_handler
+
+            await forward_command_handler(update, context)
+
+            mock_sm.send_to_window.assert_not_called()
+            mock_sm.clear_window_session.assert_not_called()
+            assert "new topic" in mock_reply.call_args.args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_other_commands_forward_without_tmux_precheck(self):
+        """/model on a Codex topic → forwarded; missing tmux window is not fatal."""
+        update = _make_update("/model")
+        context = _make_context()
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._is_codex_bound_window", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.tmux_manager") as mock_tmux,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock),
+        ):
+            mock_sm.resolve_window_for_thread.return_value = "@5"
+            mock_sm.get_display_name.return_value = "project"
+            mock_tmux.find_window_by_id = AsyncMock(return_value=None)
+            mock_sm.send_to_window = AsyncMock(return_value=(True, "ok"))
+
+            from ccbot.bot import forward_command_handler
+
+            await forward_command_handler(update, context)
+
+            mock_sm.send_to_window.assert_called_once_with("@5", "/model")

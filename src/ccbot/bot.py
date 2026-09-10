@@ -59,6 +59,8 @@ from telegram.ext import (
 )
 
 from .codex_remote import (
+    CODEX_TUI_COMMANDS,
+    SHELL_COMMANDS,
     codex_remote_manager,
     codex_thread_id_from_window_id,
     is_codex_window_id,
@@ -83,15 +85,16 @@ from .handlers.callback_data import (
     CB_DIR_UP,
     CB_HISTORY_NEXT,
     CB_HISTORY_PREV,
+    CB_KEYS_PREFIX,
+    CB_SCREENSHOT_REFRESH,
     CB_SESSION_CANCEL,
     CB_SESSION_NEW,
     CB_SESSION_SELECT,
-    CB_KEYS_PREFIX,
-    CB_SCREENSHOT_REFRESH,
     CB_WIN_BIND,
     CB_WIN_CANCEL,
     CB_WIN_NEW,
 )
+from .handlers.cleanup import clear_topic_state
 from .handlers.directory_browser import (
     BROWSE_DIRS_KEY,
     BROWSE_PAGE_KEY,
@@ -99,21 +102,20 @@ from .handlers.directory_browser import (
     SELECTED_AGENT_KEY,
     SESSIONS_KEY,
     STATE_BROWSING_DIRECTORY,
-    STATE_SELECTING_AGENT,
     STATE_KEY,
+    STATE_SELECTING_AGENT,
     STATE_SELECTING_SESSION,
     STATE_SELECTING_WINDOW,
     UNBOUND_WINDOWS_KEY,
     build_agent_picker,
     build_directory_browser,
     build_session_picker,
-    clear_agent_picker_state,
     build_window_picker,
+    clear_agent_picker_state,
     clear_browse_state,
     clear_session_picker_state,
     clear_window_picker_state,
 )
-from .handlers.cleanup import clear_topic_state
 from .handlers.history import send_history
 from .handlers.interactive_ui import (
     INTERACTIVE_TOOL_NAMES,
@@ -138,9 +140,9 @@ from .handlers.message_sender import (
     safe_send,
     send_with_fallback,
 )
-from .markdown_v2 import convert_markdown
 from .handlers.response_builder import build_response_parts
 from .handlers.status_polling import status_poll_loop
+from .markdown_v2 import convert_markdown
 from .screenshot import text_to_image
 from .session import session_manager
 from .session_monitor import NewMessage, SessionMonitor
@@ -157,6 +159,11 @@ session_monitor: SessionMonitor | None = None
 
 # Status polling task
 _status_poll_task: asyncio.Task | None = None
+
+# Codex TUI slash commands that replace the thread behind a window.  Typed
+# into the tmux TUI they would leave ccbot tracking a stale thread id, so
+# forward_command_handler rejects them for Codex topics.
+CODEX_THREAD_REPLACING_COMMANDS = frozenset({"/new", "/clear"})
 
 # Claude Code commands shown in bot menu (forwarded via tmux)
 CC_COMMANDS: dict[str, str] = {
@@ -638,7 +645,18 @@ async def forward_command_handler(
         await safe_reply(update.message, "❌ No session bound to this topic.")
         return
 
-    if not _is_codex_bound_window(wid):
+    if _is_codex_bound_window(wid):
+        # These Codex TUI commands replace the thread behind the window, which
+        # would desync the thread id ccbot tracks for this topic.
+        if cc_slash.strip().split()[0].lower() in CODEX_THREAD_REPLACING_COMMANDS:
+            await safe_reply(
+                update.message,
+                f"⚠ {cc_slash.strip()} is not supported in a Codex topic "
+                "because it would start a new thread. "
+                "Create a new topic to start a fresh Codex session.",
+            )
+            return
+    else:
         w = await tmux_manager.find_window_by_id(wid)
         if not w:
             display = session_manager.get_display_name(wid)
@@ -845,8 +863,8 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 # Active bash capture tasks: (user_id, thread_id) → asyncio.Task
 _bash_capture_tasks: dict[tuple[int, int], asyncio.Task[None]] = {}
-_SHELL_COMMANDS = {"", "bash", "sh", "zsh", "fish", "nu", "elvish"}
-_CODEX_TUI_COMMANDS = {"codex", "node"}
+_SHELL_COMMANDS = SHELL_COMMANDS
+_CODEX_TUI_COMMANDS = CODEX_TUI_COMMANDS
 
 
 async def _restore_codex_remote_windows() -> None:
@@ -1327,10 +1345,39 @@ async def _create_and_bind_window(
         return
 
     if selected_agent == AGENT_CODEX:
+        pending_text = (
+            context.user_data.get("_pending_thread_text") if context.user_data else None
+        )
+        pending_sent = False
         try:
             thread = await codex_remote_manager.create_thread(
                 selected_path, resume_thread_id=resume_session_id
             )
+            # A brand-new thread has no rollout file until its first turn, and
+            # the tmux TUI attaches with `codex resume`, which needs that file.
+            # Send the pending first message through app-server now so the
+            # rollout exists before the TUI starts; later messages are typed
+            # into the TUI (see SessionManager.send_to_window).
+            if not resume_session_id and pending_text:
+                send_ok, send_msg = await codex_remote_manager.send_to_thread(
+                    thread.thread_id, pending_text
+                )
+                if send_ok:
+                    pending_sent = True
+                    if not await codex_remote_manager.wait_until_resumable(
+                        thread.thread_id
+                    ):
+                        logger.warning(
+                            "Codex rollout for %s not visible before TUI start; "
+                            "the TUI may fail to attach",
+                            thread.thread_id,
+                        )
+                else:
+                    logger.warning(
+                        "Failed to send first message to Codex thread %s: %s",
+                        thread.thread_id,
+                        send_msg,
+                    )
             # Newly started app-server threads are kept in memory until the
             # first user message materializes the JSONL rollout. Remote TUI
             # clients can still attach to that loaded thread directly.
@@ -1397,12 +1444,7 @@ async def _create_and_bind_window(
                 query,
                 f"✅ {message}\n\nCodex {status.lower()}. Send messages here.",
             )
-            pending_text = (
-                context.user_data.get("_pending_thread_text")
-                if context.user_data
-                else None
-            )
-            if pending_text:
+            if pending_text and not pending_sent:
                 if context.user_data is not None:
                     _clear_pending_context(context.user_data)
                 send_ok, send_msg = await session_manager.send_to_window(

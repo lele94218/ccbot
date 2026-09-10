@@ -36,6 +36,16 @@ CODEX_UPDATE_CHECK_CONFIG = "check_for_update_on_startup=false"
 CODEX_DANGEROUS_BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
 LISTENING_RE = re.compile(r"listening on:\s+(wss?://\S+)")
 
+# Foreground process names seen in a tmux pane: a bare shell (the TUI has
+# exited or not started) vs. a live Codex TUI (`codex` is a node launcher).
+SHELL_COMMANDS = frozenset({"", "bash", "sh", "zsh", "fish", "nu", "elvish"})
+CODEX_TUI_COMMANDS = frozenset({"codex", "node"})
+
+
+def is_codex_tui_command(pane_current_command: str) -> bool:
+    """Return True when a pane's foreground process looks like the Codex TUI."""
+    return Path(pane_current_command or "").name in CODEX_TUI_COMMANDS
+
 
 def make_codex_window_id(thread_id: str) -> str:
     """Encode a Codex thread id as a routing key compatible with window bindings."""

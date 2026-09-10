@@ -256,3 +256,144 @@ class TestIsWindowId:
         assert mgr._is_window_id("@") is False
         assert mgr._is_window_id("") is False
         assert mgr._is_window_id("@abc") is False
+
+
+class TestCodexHybridInput:
+    """Codex windows type into the tmux TUI when it exists, else use app-server."""
+
+    def _codex_window(self, mgr: SessionManager, window_id: str = "@7") -> None:
+        mgr.window_states[window_id] = WindowState(
+            agent=AGENT_CODEX,
+            session_id="019e459d-c98d-7223-85b5-de7c290f859e",
+            cwd="/tmp/project",
+            window_name="project",
+        )
+
+    async def test_prefers_tmux_when_window_exists(
+        self, monkeypatch, mgr: SessionManager
+    ) -> None:
+        self._codex_window(mgr)
+        window = AsyncMock()
+        window.window_id = "@7"
+        window.pane_current_command = "node"
+        find = AsyncMock(return_value=window)
+        send_keys = AsyncMock(return_value=True)
+        send_to_thread = AsyncMock(return_value=(True, "api"))
+        monkeypatch.setattr(session_module.tmux_manager, "find_window_by_id", find)
+        monkeypatch.setattr(session_module.tmux_manager, "send_keys", send_keys)
+        from ccbot import codex_remote
+
+        monkeypatch.setattr(
+            codex_remote.codex_remote_manager, "send_to_thread", send_to_thread
+        )
+
+        ok, _ = await mgr.send_to_window("@7", "/model")
+
+        assert ok
+        send_keys.assert_awaited_once_with("@7", "/model")
+        send_to_thread.assert_not_awaited()
+
+    async def test_falls_back_to_app_server_when_window_missing(
+        self, monkeypatch, mgr: SessionManager
+    ) -> None:
+        self._codex_window(mgr)
+        send_keys = AsyncMock(return_value=True)
+        send_to_thread = AsyncMock(return_value=(True, "api"))
+        monkeypatch.setattr(
+            session_module.tmux_manager,
+            "find_window_by_id",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(session_module.tmux_manager, "send_keys", send_keys)
+        from ccbot import codex_remote
+
+        monkeypatch.setattr(
+            codex_remote.codex_remote_manager, "send_to_thread", send_to_thread
+        )
+
+        ok, msg = await mgr.send_to_window("@7", "hello")
+
+        assert (ok, msg) == (True, "api")
+        send_keys.assert_not_awaited()
+        send_to_thread.assert_awaited_once_with(
+            "019e459d-c98d-7223-85b5-de7c290f859e", "hello"
+        )
+
+    async def test_falls_back_to_app_server_when_tmux_send_fails(
+        self, monkeypatch, mgr: SessionManager
+    ) -> None:
+        self._codex_window(mgr)
+        window = AsyncMock()
+        window.window_id = "@7"
+        window.pane_current_command = "codex"
+        send_to_thread = AsyncMock(return_value=(True, "api"))
+        monkeypatch.setattr(
+            session_module.tmux_manager,
+            "find_window_by_id",
+            AsyncMock(return_value=window),
+        )
+        monkeypatch.setattr(
+            session_module.tmux_manager, "send_keys", AsyncMock(return_value=False)
+        )
+        from ccbot import codex_remote
+
+        monkeypatch.setattr(
+            codex_remote.codex_remote_manager, "send_to_thread", send_to_thread
+        )
+
+        ok, _ = await mgr.send_to_window("@7", "hello")
+
+        assert ok
+        send_to_thread.assert_awaited_once()
+
+    async def test_legacy_pseudo_window_uses_app_server_directly(
+        self, monkeypatch, mgr: SessionManager
+    ) -> None:
+        window_id = mgr.bind_codex_thread(
+            100, 1, "019e459d-c98d-7223-85b5-de7c290f859e", "/tmp/project", "project"
+        )
+        find = AsyncMock(return_value=None)
+        send_to_thread = AsyncMock(return_value=(True, "api"))
+        monkeypatch.setattr(session_module.tmux_manager, "find_window_by_id", find)
+        from ccbot import codex_remote
+
+        monkeypatch.setattr(
+            codex_remote.codex_remote_manager, "send_to_thread", send_to_thread
+        )
+
+        ok, _ = await mgr.send_to_window(window_id, "hello")
+
+        assert ok
+        find.assert_not_awaited()
+        send_to_thread.assert_awaited_once_with(
+            "019e459d-c98d-7223-85b5-de7c290f859e", "hello"
+        )
+
+    @pytest.mark.parametrize("shell", ["zsh", "bash", "/bin/sh", ""])
+    async def test_never_types_into_a_bare_shell(
+        self, monkeypatch, mgr: SessionManager, shell: str
+    ) -> None:
+        """If the TUI exited, text must go to app-server, never to the shell."""
+        self._codex_window(mgr)
+        window = AsyncMock()
+        window.window_id = "@7"
+        window.pane_current_command = shell
+        send_keys = AsyncMock(return_value=True)
+        send_to_thread = AsyncMock(return_value=(True, "api"))
+        monkeypatch.setattr(
+            session_module.tmux_manager,
+            "find_window_by_id",
+            AsyncMock(return_value=window),
+        )
+        monkeypatch.setattr(session_module.tmux_manager, "send_keys", send_keys)
+        from ccbot import codex_remote
+
+        monkeypatch.setattr(
+            codex_remote.codex_remote_manager, "send_to_thread", send_to_thread
+        )
+
+        ok, msg = await mgr.send_to_window("@7", "rm -rf /")
+
+        assert (ok, msg) == (True, "api")
+        send_keys.assert_not_awaited()
+        send_to_thread.assert_awaited_once()

@@ -25,15 +25,16 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from collections.abc import Iterator
 from typing import Any
 
 import aiofiles
 
 from .codex_remote import (
     codex_thread_id_from_window_id,
+    is_codex_tui_command,
     is_codex_window_id,
     make_codex_window_id,
 )
@@ -1156,17 +1157,16 @@ class SessionManager:
     # --- Tmux helpers ---
 
     async def send_to_window(self, window_id: str, text: str) -> tuple[bool, str]:
-        """Send text to a tmux window by ID."""
-        if self.is_codex_window(window_id):
-            from .codex_remote import codex_remote_manager
+        """Send text to a tmux window by ID.
 
-            state = self.get_window_state(window_id)
-            thread_id = state.session_id
-            if is_codex_window_id(window_id):
-                thread_id = thread_id or codex_thread_id_from_window_id(window_id)
-            if not thread_id:
-                return False, "Missing Codex thread id for bound window"
-            return await codex_remote_manager.send_to_thread(thread_id, text)
+        Codex windows use a hybrid path: input is typed into the tmux-hosted
+        Codex TUI when that window exists (so TUI slash commands like /model
+        work), and falls back to the app-server API when it doesn't (legacy
+        ``codex:`` pseudo-windows or a TUI window the user closed).  Output
+        always arrives via app-server notifications regardless of the path.
+        """
+        if self.is_codex_window(window_id):
+            return await self._send_to_codex_window(window_id, text)
 
         display = self.get_display_name(window_id)
         logger.debug(
@@ -1182,6 +1182,53 @@ class SessionManager:
         if success:
             return True, f"Sent to {display}"
         return False, "Failed to send keys"
+
+    async def _send_to_codex_window(
+        self, window_id: str, text: str
+    ) -> tuple[bool, str]:
+        """Hybrid input for Codex windows: tmux TUI first, app-server fallback."""
+        from .codex_remote import codex_remote_manager
+
+        display = self.get_display_name(window_id)
+        if not is_codex_window_id(window_id):
+            window = await tmux_manager.find_window_by_id(window_id)
+            if window and not is_codex_tui_command(window.pane_current_command):
+                # The TUI exited (or never started): typing into a bare shell
+                # would execute the text as a command.  Use app-server instead.
+                logger.info(
+                    "Codex window %s pane is running %r, not the TUI; "
+                    "sending via app-server",
+                    window_id,
+                    window.pane_current_command,
+                )
+                window = None
+            if window:
+                logger.debug(
+                    "send_to_window: codex window_id=%s (%s) via tmux, text_len=%d",
+                    window_id,
+                    display,
+                    len(text),
+                )
+                if await tmux_manager.send_keys(window.window_id, text):
+                    return True, f"Sent to {display}"
+                logger.warning(
+                    "tmux send failed for Codex window %s; falling back to app-server",
+                    window_id,
+                )
+
+        state = self.get_window_state(window_id)
+        thread_id = state.session_id
+        if is_codex_window_id(window_id):
+            thread_id = thread_id or codex_thread_id_from_window_id(window_id)
+        if not thread_id:
+            return False, "Missing Codex thread id for bound window"
+        logger.debug(
+            "send_to_window: codex window_id=%s (%s) via app-server, text_len=%d",
+            window_id,
+            display,
+            len(text),
+        )
+        return await codex_remote_manager.send_to_thread(thread_id, text)
 
     # --- Message history ---
 
