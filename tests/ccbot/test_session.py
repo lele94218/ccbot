@@ -397,3 +397,48 @@ class TestCodexHybridInput:
         assert (ok, msg) == (True, "api")
         send_keys.assert_not_awaited()
         send_to_thread.assert_awaited_once()
+
+    async def test_pending_model_override_goes_via_app_server_then_clears(
+        self, monkeypatch, mgr: SessionManager
+    ) -> None:
+        self._codex_window(mgr)
+        mgr.set_codex_model_override("@7", "gpt-5.5", "low")
+        window = AsyncMock()
+        window.window_id = "@7"
+        window.pane_current_command = "node"
+        send_keys = AsyncMock(return_value=True)
+        send_to_thread = AsyncMock(return_value=(True, "api"))
+        monkeypatch.setattr(
+            session_module.tmux_manager,
+            "find_window_by_id",
+            AsyncMock(return_value=window),
+        )
+        monkeypatch.setattr(session_module.tmux_manager, "send_keys", send_keys)
+        from ccbot import codex_remote
+
+        monkeypatch.setattr(
+            codex_remote.codex_remote_manager, "send_to_thread", send_to_thread
+        )
+
+        ok, _ = await mgr.send_to_window("@7", "hello")
+        assert ok
+        send_keys.assert_not_awaited()
+        send_to_thread.assert_awaited_once_with(
+            "019e459d-c98d-7223-85b5-de7c290f859e",
+            "hello",
+            model="gpt-5.5",
+            effort="low",
+        )
+        # Override is consumed; the next message goes back to the TUI.
+        assert mgr.get_window_state("@7").pending_model == ""
+        assert mgr.get_window_state("@7").pending_effort == ""
+        await mgr.send_to_window("@7", "again")
+        send_keys.assert_awaited_once_with("@7", "again")
+
+    def test_pending_override_round_trips_through_state(self) -> None:
+        ws = WindowState(
+            agent=AGENT_CODEX, session_id="t", pending_model="m", pending_effort="e"
+        )
+        assert WindowState.from_dict(ws.to_dict()) == ws
+        plain = WindowState(agent=AGENT_CODEX, session_id="t")
+        assert "pending_model" not in plain.to_dict()

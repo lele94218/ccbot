@@ -74,6 +74,18 @@ class CodexThread:
 
 
 @dataclass
+class CodexModel:
+    """A model advertised by app-server `model/list`."""
+
+    id: str
+    display_name: str
+    description: str
+    is_default: bool
+    efforts: list[str]
+    default_effort: str
+
+
+@dataclass
 class FormattedToolItem:
     """Display-ready representation of a Codex app-server tool item."""
 
@@ -531,21 +543,34 @@ class CodexRemoteManager:
             name=str(name),
         )
 
-    async def send_to_thread(self, thread_id: str, text: str) -> tuple[bool, str]:
-        """Start a Codex turn with plain user text."""
+    async def send_to_thread(
+        self,
+        thread_id: str,
+        text: str,
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> tuple[bool, str]:
+        """Start a Codex turn with plain user text.
+
+        ``model`` / ``effort`` override the thread settings for this turn and,
+        per app-server semantics, all subsequent turns (the thread persists
+        them, and an attached TUI picks them up as well).
+        """
         if not thread_id:
             return False, "Missing Codex thread id"
+        params: dict[str, Any] = {
+            "threadId": thread_id,
+            "input": [
+                {"type": "text", "text": text, "text_elements": []},
+            ],
+        }
+        if model:
+            params["model"] = model
+        if effort:
+            params["effort"] = effort
         try:
-            result = await self.client.request(
-                "turn/start",
-                {
-                    "threadId": thread_id,
-                    "input": [
-                        {"type": "text", "text": text, "text_elements": []},
-                    ],
-                },
-                timeout=30.0,
-            )
+            result = await self.client.request("turn/start", params, timeout=30.0)
             turn_id = self._turn_id_from_result(result)
             if turn_id:
                 self._active_turn_ids[thread_id] = turn_id
@@ -553,6 +578,43 @@ class CodexRemoteManager:
             logger.exception("Failed to start Codex turn")
             return False, str(e)
         return True, f"Sent to Codex thread {thread_id}"
+
+    async def list_models(self, *, include_hidden: bool = False) -> list[CodexModel]:
+        """Return the models app-server advertises for the picker."""
+        models: list[CodexModel] = []
+        cursor: str | None = None
+        for _ in range(10):  # bounded pagination
+            params: dict[str, Any] = {"includeHidden": include_hidden}
+            if cursor:
+                params["cursor"] = cursor
+            result = await self.client.request("model/list", params, timeout=30.0)
+            for raw in result.get("data") or []:
+                if not isinstance(raw, dict):
+                    continue
+                model_id = str(raw.get("id") or raw.get("model") or "")
+                if not model_id or (raw.get("hidden") and not include_hidden):
+                    continue
+                efforts: list[str] = []
+                for item in raw.get("supportedReasoningEfforts") or []:
+                    value = (
+                        item.get("reasoningEffort") if isinstance(item, dict) else item
+                    )
+                    if value:
+                        efforts.append(str(value))
+                models.append(
+                    CodexModel(
+                        id=model_id,
+                        display_name=str(raw.get("displayName") or model_id),
+                        description=str(raw.get("description") or ""),
+                        is_default=bool(raw.get("isDefault")),
+                        efforts=efforts,
+                        default_effort=str(raw.get("defaultReasoningEffort") or ""),
+                    )
+                )
+            cursor = result.get("nextCursor") or None
+            if not cursor:
+                break
+        return models
 
     async def interrupt_thread(self, thread_id: str) -> tuple[bool, str]:
         """Interrupt the active turn for a Codex thread."""

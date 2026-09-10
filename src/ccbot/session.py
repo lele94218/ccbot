@@ -55,12 +55,17 @@ class WindowState:
         session_id: Associated agent session/thread ID (empty if not yet detected)
         cwd: Working directory for direct file path construction
         window_name: Display name of the window
+        pending_model / pending_effort: Codex settings chosen from Telegram
+            that are applied on the next app-server turn (see
+            SessionManager.send_to_window), then cleared.
     """
 
     agent: str = ""
     session_id: str = ""
     cwd: str = ""
     window_name: str = ""
+    pending_model: str = ""
+    pending_effort: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -70,6 +75,10 @@ class WindowState:
         }
         if self.window_name:
             d["window_name"] = self.window_name
+        if self.pending_model:
+            d["pending_model"] = self.pending_model
+        if self.pending_effort:
+            d["pending_effort"] = self.pending_effort
         return d
 
     @classmethod
@@ -93,6 +102,8 @@ class WindowState:
             session_id=data.get("session_id", ""),
             cwd=data.get("cwd", ""),
             window_name=data.get("window_name", ""),
+            pending_model=str(data.get("pending_model") or ""),
+            pending_effort=str(data.get("pending_effort") or ""),
         )
 
 
@@ -1190,6 +1201,34 @@ class SessionManager:
         from .codex_remote import codex_remote_manager
 
         display = self.get_display_name(window_id)
+        state = self.get_window_state(window_id)
+        if state.pending_model or state.pending_effort:
+            # A model/effort chosen from Telegram is applied by sending this
+            # message through app-server with overrides; the thread persists
+            # them for later turns, including ones typed into the TUI.
+            thread_id = state.session_id
+            if is_codex_window_id(window_id):
+                thread_id = thread_id or codex_thread_id_from_window_id(window_id)
+            if not thread_id:
+                return False, "Missing Codex thread id for bound window"
+            model, effort = state.pending_model, state.pending_effort
+            logger.info(
+                "send_to_window: codex window_id=%s (%s) via app-server with "
+                "model=%r effort=%r",
+                window_id,
+                display,
+                model,
+                effort,
+            )
+            ok, msg = await codex_remote_manager.send_to_thread(
+                thread_id, text, model=model or None, effort=effort or None
+            )
+            if ok:
+                state.pending_model = ""
+                state.pending_effort = ""
+                self._save_state()
+            return ok, msg
+
         if not is_codex_window_id(window_id):
             window = await tmux_manager.find_window_by_id(window_id)
             if window and not is_codex_tui_command(window.pane_current_command):
@@ -1216,7 +1255,6 @@ class SessionManager:
                     window_id,
                 )
 
-        state = self.get_window_state(window_id)
         thread_id = state.session_id
         if is_codex_window_id(window_id):
             thread_id = thread_id or codex_thread_id_from_window_id(window_id)
@@ -1229,6 +1267,15 @@ class SessionManager:
             len(text),
         )
         return await codex_remote_manager.send_to_thread(thread_id, text)
+
+    def set_codex_model_override(
+        self, window_id: str, model: str, effort: str = ""
+    ) -> None:
+        """Remember a Codex model/effort to apply on the window's next turn."""
+        state = self.get_window_state(window_id)
+        state.pending_model = model
+        state.pending_effort = effort
+        self._save_state()
 
     # --- Message history ---
 

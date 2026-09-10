@@ -78,6 +78,9 @@ from .handlers.callback_data import (
     CB_ASK_SPACE,
     CB_ASK_TAB,
     CB_ASK_UP,
+    CB_CODEX_EFFORT_SELECT,
+    CB_CODEX_MODEL_CANCEL,
+    CB_CODEX_MODEL_SELECT,
     CB_DIR_CANCEL,
     CB_DIR_CONFIRM,
     CB_DIR_PAGE,
@@ -95,6 +98,14 @@ from .handlers.callback_data import (
     CB_WIN_NEW,
 )
 from .handlers.cleanup import clear_topic_state
+from .handlers.codex_model_picker import (
+    MODEL_PICK_MODEL_KEY,
+    MODEL_PICK_MODELS_KEY,
+    build_effort_picker,
+    build_model_picker,
+    format_model_choice,
+    parse_model_args,
+)
 from .handlers.directory_browser import (
     BROWSE_DIRS_KEY,
     BROWSE_PAGE_KEY,
@@ -646,9 +657,15 @@ async def forward_command_handler(
         return
 
     if _is_codex_bound_window(wid):
+        head, _, args = cc_slash.strip().partition(" ")
+        if head.lower() == "/model":
+            # Codex's /model is a terminal menu ccbot cannot render; use the
+            # Telegram-native picker instead.
+            await _codex_model_command(update, context, wid, args.strip())
+            return
         # These Codex TUI commands replace the thread behind the window, which
         # would desync the thread id ccbot tracks for this topic.
-        if cc_slash.strip().split()[0].lower() in CODEX_THREAD_REPLACING_COMMANDS:
+        if head.lower() in CODEX_THREAD_REPLACING_COMMANDS:
             await safe_reply(
                 update.message,
                 f"⚠ {cc_slash.strip()} is not supported in a Codex topic "
@@ -683,6 +700,37 @@ async def forward_command_handler(
         # proactive detection needed here — the poller handles it.
     else:
         await safe_reply(update.message, f"❌ {message}")
+
+
+async def _codex_model_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, wid: str, args: str
+) -> None:
+    """Handle /model in a Codex topic: direct ``/model <id> [effort]`` or picker."""
+    assert update.message
+    try:
+        models = await codex_remote_manager.list_models()
+    except Exception as e:
+        logger.exception("Failed to list Codex models")
+        await safe_reply(update.message, f"❌ Failed to list Codex models: {e}")
+        return
+    if not models:
+        await safe_reply(update.message, "❌ Codex app-server returned no models.")
+        return
+
+    if args:
+        model_id, effort, error = parse_model_args(args, models)
+        if error:
+            await safe_reply(update.message, f"❌ {error}")
+            return
+        session_manager.set_codex_model_override(wid, model_id, effort)
+        await safe_reply(update.message, format_model_choice(model_id, effort))
+        return
+
+    if context.user_data is not None:
+        context.user_data[MODEL_PICK_MODELS_KEY] = {m.id: m for m in models}
+        context.user_data.pop(MODEL_PICK_MODEL_KEY, None)
+    text, keyboard = build_model_picker(models)
+    await safe_reply(update.message, text, reply_markup=keyboard)
 
 
 async def unsupported_content_handler(
@@ -1643,6 +1691,64 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else:
             await safe_edit(query, "Window no longer exists.")
         await query.answer("Page updated")
+
+    # Codex model picker
+    elif data.startswith(CB_CODEX_MODEL_SELECT):
+        models = (
+            context.user_data.get(MODEL_PICK_MODELS_KEY) if context.user_data else None
+        )
+        model = models.get(data[len(CB_CODEX_MODEL_SELECT) :]) if models else None
+        if model is None:
+            await safe_edit(query, "Stale model picker. Send /model again.")
+            await query.answer("Stale picker", show_alert=True)
+            return
+        if not model.efforts:
+            wid = session_manager.resolve_window_for_thread(user.id, cb_thread_id)
+            if not wid:
+                await query.answer("No session bound to this topic", show_alert=True)
+                return
+            session_manager.set_codex_model_override(wid, model.id, "")
+            if context.user_data is not None:
+                context.user_data.pop(MODEL_PICK_MODELS_KEY, None)
+            await safe_edit(query, format_model_choice(model.id, ""))
+            await query.answer(model.display_name)
+            return
+        if context.user_data is not None:
+            context.user_data[MODEL_PICK_MODEL_KEY] = model.id
+        text, keyboard = build_effort_picker(model)
+        await safe_edit(query, text, reply_markup=keyboard)
+        await query.answer(model.display_name)
+
+    elif data.startswith(CB_CODEX_EFFORT_SELECT):
+        models = (
+            context.user_data.get(MODEL_PICK_MODELS_KEY) if context.user_data else None
+        )
+        model_id = (
+            context.user_data.get(MODEL_PICK_MODEL_KEY) if context.user_data else None
+        )
+        model = models.get(model_id) if models and model_id else None
+        effort = data[len(CB_CODEX_EFFORT_SELECT) :]
+        if model is None or (model.efforts and effort not in model.efforts):
+            await safe_edit(query, "Stale model picker. Send /model again.")
+            await query.answer("Stale picker", show_alert=True)
+            return
+        wid = session_manager.resolve_window_for_thread(user.id, cb_thread_id)
+        if not wid:
+            await query.answer("No session bound to this topic", show_alert=True)
+            return
+        session_manager.set_codex_model_override(wid, model.id, effort)
+        if context.user_data is not None:
+            context.user_data.pop(MODEL_PICK_MODELS_KEY, None)
+            context.user_data.pop(MODEL_PICK_MODEL_KEY, None)
+        await safe_edit(query, format_model_choice(model.id, effort))
+        await query.answer(f"{model.display_name} {effort}")
+
+    elif data == CB_CODEX_MODEL_CANCEL:
+        if context.user_data is not None:
+            context.user_data.pop(MODEL_PICK_MODELS_KEY, None)
+            context.user_data.pop(MODEL_PICK_MODEL_KEY, None)
+        await safe_edit(query, "Model change cancelled.")
+        await query.answer("Cancelled")
 
     # Agent picker
     elif data.startswith(CB_AGENT_SELECT):

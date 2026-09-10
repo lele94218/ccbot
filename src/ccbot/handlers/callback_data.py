@@ -7,6 +7,7 @@ Constants:
   - CB_HISTORY_*: History pagination
   - CB_DIR_*: Directory browser navigation
   - CB_WIN_*: Window picker (bind existing unbound window)
+  - CB_CODEX_MODEL_*/CB_CODEX_EFFORT_*: Codex model picker
   - CB_SCREENSHOT_*: Screenshot refresh
   - CB_ASK_*: Interactive UI navigation (arrows, enter, esc)
   - CB_KEYS_PREFIX: Screenshot control keys (kb:<key_id>:<window>)
@@ -31,6 +32,11 @@ CB_WIN_CANCEL = "wb:cancel"
 # Agent picker
 CB_AGENT_SELECT = "ag:sel:"  # ag:sel:<agent>
 CB_AGENT_CANCEL = "ag:cancel"
+
+# Codex model picker (Telegram-native /model for Codex topics)
+CB_CODEX_MODEL_SELECT = "cm:sel:"  # cm:sel:<model_id>
+CB_CODEX_EFFORT_SELECT = "cm:eff:"  # cm:eff:<effort>  (model kept in user_data)
+CB_CODEX_MODEL_CANCEL = "cm:cancel"
 
 # Screenshot
 CB_SCREENSHOT_REFRESH = "ss:ref:"

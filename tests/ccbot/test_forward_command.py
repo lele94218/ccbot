@@ -134,8 +134,8 @@ class TestForwardCommandCodex:
 
     @pytest.mark.asyncio
     async def test_other_commands_forward_without_tmux_precheck(self):
-        """/model on a Codex topic → forwarded; missing tmux window is not fatal."""
-        update = _make_update("/model")
+        """/status on a Codex topic → forwarded; missing tmux window is not fatal."""
+        update = _make_update("/status")
         context = _make_context()
 
         with (
@@ -155,4 +155,77 @@ class TestForwardCommandCodex:
 
             await forward_command_handler(update, context)
 
-            mock_sm.send_to_window.assert_called_once_with("@5", "/model")
+            mock_sm.send_to_window.assert_called_once_with("@5", "/status")
+
+    @pytest.mark.asyncio
+    async def test_model_direct_args_sets_override(self):
+        """/model gpt-5.5 low on a Codex topic → override stored, nothing typed."""
+        from ccbot.codex_remote import CodexModel
+
+        update = _make_update("/model gpt-5.5 low")
+        context = _make_context()
+        models = [
+            CodexModel(
+                "gpt-6-astra", "GPT-6-Astra", "", True, ["low", "medium"], "medium"
+            ),
+            CodexModel("gpt-5.5", "GPT-5.5", "", False, ["low", "high"], "high"),
+        ]
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._is_codex_bound_window", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.codex_remote_manager") as mock_codex,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.resolve_window_for_thread.return_value = "@5"
+            mock_sm.send_to_window = AsyncMock()
+            mock_codex.list_models = AsyncMock(return_value=models)
+
+            from ccbot.bot import forward_command_handler
+
+            await forward_command_handler(update, context)
+
+            mock_sm.set_codex_model_override.assert_called_once_with(
+                "@5", "gpt-5.5", "low"
+            )
+            mock_sm.send_to_window.assert_not_called()
+            assert "gpt-5.5 low" in mock_reply.call_args.args[1]
+
+    @pytest.mark.asyncio
+    async def test_model_without_args_shows_picker(self):
+        """/model on a Codex topic → inline keyboard with one button per model."""
+        from ccbot.codex_remote import CodexModel
+
+        update = _make_update("/model")
+        context = _make_context()
+        models = [
+            CodexModel("gpt-6-astra", "GPT-6-Astra", "best", True, ["low"], "low"),
+            CodexModel("gpt-5.5", "GPT-5.5", "older", False, ["low"], "low"),
+        ]
+
+        with (
+            patch("ccbot.bot.is_user_allowed", return_value=True),
+            patch("ccbot.bot._get_thread_id", return_value=42),
+            patch("ccbot.bot._is_codex_bound_window", return_value=True),
+            patch("ccbot.bot.session_manager") as mock_sm,
+            patch("ccbot.bot.codex_remote_manager") as mock_codex,
+            patch("ccbot.bot.safe_reply", new_callable=AsyncMock) as mock_reply,
+        ):
+            mock_sm.resolve_window_for_thread.return_value = "@5"
+            mock_codex.list_models = AsyncMock(return_value=models)
+
+            from ccbot.bot import forward_command_handler
+            from ccbot.handlers.codex_model_picker import MODEL_PICK_MODELS_KEY
+
+            await forward_command_handler(update, context)
+
+            keyboard = mock_reply.call_args.kwargs["reply_markup"]
+            labels = [b.text for row in keyboard.inline_keyboard for b in row]
+            assert labels == ["GPT-6-Astra", "GPT-5.5", "Cancel"]
+            assert set(context.user_data[MODEL_PICK_MODELS_KEY]) == {
+                "gpt-6-astra",
+                "gpt-5.5",
+            }
+            mock_sm.set_codex_model_override.assert_not_called()
