@@ -35,6 +35,7 @@ Key functions: create_bot(), handle_new_message().
 import asyncio
 import io
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction
+from telegram.error import BadRequest
 from telegram.ext import (
     AIORateLimiter,
     Application,
@@ -737,7 +739,7 @@ async def unsupported_content_handler(
     update: Update,
     _context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Reply to non-text messages (stickers, video, etc.)."""
+    """Reply to content ccbot cannot forward (stickers, polls, locations, etc.)."""
     if not update.message:
         return
     user = update.effective_user
@@ -746,7 +748,8 @@ async def unsupported_content_handler(
     logger.debug("Unsupported content from user %d", user.id)
     await safe_reply(
         update.message,
-        "⚠ Only text, photo, and voice messages are supported. Stickers, video, and other media cannot be forwarded to Claude Code.",
+        "⚠ Only text, photo, voice, video, and file messages are supported. "
+        "Stickers and other media cannot be forwarded.",
     )
 
 
@@ -755,18 +758,23 @@ _IMAGES_DIR = ccbot_dir() / "images"
 _IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
 
-async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle photos sent by the user: download and forward path to Claude Code."""
+async def _resolve_attachment_target(
+    update: Update,
+) -> tuple[int, int, str] | None:
+    """Resolve (user_id, thread_id, window_id) for an attachment message.
+
+    Replies to the user and returns None when the message cannot be routed
+    (unauthorized, not in a named topic, no bound session, window gone).
+    """
     user = update.effective_user
+    message = update.message
+    if not message:
+        return None
     if not user or not is_user_allowed(user.id):
-        if update.message:
-            await safe_reply(update.message, "You are not authorized to use this bot.")
-        return
+        await safe_reply(message, "You are not authorized to use this bot.")
+        return None
 
-    if not update.message or not update.message.photo:
-        return
-
-    chat = update.message.chat
+    chat = message.chat
     thread_id = _get_thread_id(update)
     if chat.type in ("group", "supergroup") and thread_id is not None:
         session_manager.set_group_chat_id(user.id, thread_id, chat.id)
@@ -774,32 +782,41 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     # Must be in a named topic
     if thread_id is None:
         await safe_reply(
-            update.message,
+            message,
             "❌ Please use a named topic. Create a new topic to start a session.",
         )
-        return
+        return None
 
     wid = session_manager.get_window_for_thread(user.id, thread_id)
     if wid is None:
         await safe_reply(
-            update.message,
+            message,
             "❌ No session bound to this topic. Send a text message first to create one.",
         )
-        return
+        return None
 
-    if not _is_codex_bound_window(wid):
-        w = await tmux_manager.find_window_by_id(wid)
-    else:
-        w = True
-    if not w:
+    if not _is_codex_bound_window(wid) and not await tmux_manager.find_window_by_id(
+        wid
+    ):
         display = session_manager.get_display_name(wid)
         session_manager.unbind_thread(user.id, thread_id)
         await safe_reply(
-            update.message,
+            message,
             f"❌ Window '{display}' no longer exists. Binding removed.\n"
             "Send a message to start a new session.",
         )
+        return None
+    return user.id, thread_id, wid
+
+
+async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle photos sent by the user: download and forward path to Claude Code."""
+    if not update.message or not update.message.photo:
         return
+    target = await _resolve_attachment_target(update)
+    if target is None:
+        return
+    user_id, thread_id, wid = target
 
     # Download the highest-resolution photo
     photo = update.message.photo[-1]
@@ -818,7 +835,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         text_to_send = f"(image attached: {file_path})"
 
     await update.message.chat.send_action(ChatAction.TYPING)
-    clear_status_msg_info(user.id, thread_id)
+    clear_status_msg_info(user_id, thread_id)
 
     success, message = await session_manager.send_to_window(wid, text_to_send)
     if not success:
@@ -826,8 +843,106 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     # Confirm to user
-    target = "Codex" if _is_codex_bound_window(wid) else "Claude Code"
-    await safe_reply(update.message, f"📷 Image sent to {target}.")
+    agent_label = "Codex" if _is_codex_bound_window(wid) else "Claude Code"
+    await safe_reply(update.message, f"📷 Image sent to {agent_label}.")
+
+
+# Telegram Bot API limit for getFile downloads by bots.
+_TELEGRAM_DOWNLOAD_LIMIT = 20 * 1024 * 1024
+_MEDIA_DIR = ccbot_dir() / "media"
+_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^\w.\-]+")
+
+
+def _extract_attachment(message: Any) -> tuple[Any, str, str] | None:
+    """Return (telegram_file_object, kind, filename) for a video or file message.
+
+    Animations are checked before documents because Telegram sets both on
+    GIF/animation messages.
+    """
+    candidates = (
+        ("video", getattr(message, "video", None), ".mp4"),
+        ("video note", getattr(message, "video_note", None), ".mp4"),
+        ("animation", getattr(message, "animation", None), ".mp4"),
+        ("file", getattr(message, "document", None), ""),
+    )
+    for kind, obj, default_ext in candidates:
+        if obj is None:
+            continue
+        original = getattr(obj, "file_name", None) or ""
+        stem = _UNSAFE_FILENAME_CHARS.sub("_", original).strip("._")[:80]
+        if not stem:
+            stem = f"{kind.replace(' ', '_')}{default_ext}"
+        filename = f"{int(time.time())}_{obj.file_unique_id}_{stem}"
+        return obj, kind, filename
+    return None
+
+
+def _format_size(size: int) -> str:
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+async def media_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle videos, video notes, animations, and files.
+
+    Downloads the attachment to ~/.ccbot/media/ and forwards its path to the
+    bound agent, like photo_handler does for images.  Telegram bots can only
+    download files up to 20 MB, so larger files get an explanatory reply.
+    """
+    if not update.message:
+        return
+    extracted = _extract_attachment(update.message)
+    if extracted is None:
+        return
+    target = await _resolve_attachment_target(update)
+    if target is None:
+        return
+    user_id, thread_id, wid = target
+    tg_obj, kind, filename = extracted
+
+    size = getattr(tg_obj, "file_size", None) or 0
+    too_big_msg = (
+        f"❌ This {kind} is too large for a Telegram bot to download "
+        f"(limit {_format_size(_TELEGRAM_DOWNLOAD_LIMIT)}). "
+        "Send a shorter or compressed version, or copy it to the Mac and "
+        "send its path as text."
+    )
+    if size > _TELEGRAM_DOWNLOAD_LIMIT:
+        await safe_reply(
+            update.message, too_big_msg.replace("This", f"This {_format_size(size)}", 1)
+        )
+        return
+
+    file_path = _MEDIA_DIR / filename
+    try:
+        tg_file = await tg_obj.get_file()
+        await tg_file.download_to_drive(file_path)
+    except BadRequest as e:
+        if "too big" in str(e).lower():
+            await safe_reply(update.message, too_big_msg)
+            return
+        logger.exception("Failed to download %s", kind)
+        await safe_reply(update.message, f"❌ Failed to download {kind}: {e}")
+        return
+
+    note = f"({kind} attached: {file_path})"
+    if kind in ("video", "video note", "animation"):
+        note += " You can inspect it with ffprobe and extract frames with ffmpeg."
+    caption = update.message.caption or ""
+    text_to_send = f"{caption}\n\n{note}" if caption else note
+
+    await update.message.chat.send_action(ChatAction.TYPING)
+    clear_status_msg_info(user_id, thread_id)
+    success, message = await session_manager.send_to_window(wid, text_to_send)
+    if not success:
+        await safe_reply(update.message, f"❌ {message}")
+        return
+
+    agent_label = "Codex" if _is_codex_bound_window(wid) else "Claude Code"
+    icon = "📎" if kind == "file" else "🎬"
+    await safe_reply(
+        update.message, f"{icon} {kind.capitalize()} sent to {agent_label}."
+    )
 
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2603,7 +2718,17 @@ def create_bot() -> Application:
     application.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     # Voice: transcribe via OpenAI and forward text to Claude Code
     application.add_handler(MessageHandler(filters.VOICE, voice_handler))
-    # Catch-all: non-text content (stickers, video, etc.)
+    # Videos, video notes, animations, and files: download and forward path
+    application.add_handler(
+        MessageHandler(
+            filters.VIDEO
+            | filters.VIDEO_NOTE
+            | filters.ANIMATION
+            | filters.Document.ALL,
+            media_handler,
+        )
+    )
+    # Catch-all: remaining non-text content (stickers, polls, locations, etc.)
     application.add_handler(
         MessageHandler(
             ~filters.COMMAND & ~filters.TEXT & ~filters.StatusUpdate.ALL,
