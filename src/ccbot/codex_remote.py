@@ -128,10 +128,18 @@ class CodexAppServerClient:
 
     @property
     def is_running(self) -> bool:
+        """True while app-server is alive and our WebSocket reader is running.
+
+        A closed connection (reader task finished) counts as not running, so
+        the next request restarts app-server and the restart callback
+        restores TUIs and subscriptions instead of failing silently.
+        """
         return (
             self._proc is not None
             and self._proc.returncode is None
             and self._ws is not None
+            and self._ws_reader_task is not None
+            and not self._ws_reader_task.done()
         )
 
     @property
@@ -206,7 +214,11 @@ class CodexAppServerClient:
                 raise
 
             try:
-                self._ws = await connect(self._remote_url)
+                # No frame size limit: app-server is our own local child process,
+                # and responses such as thread/resume carry thread history that
+                # easily exceeds websockets' 1 MiB default.  Exceeding it closes
+                # the connection (1009) and silently drops all Codex events.
+                self._ws = await connect(self._remote_url, max_size=None)
                 self._ws_reader_task = asyncio.create_task(self._read_ws_messages())
 
                 await self.request(

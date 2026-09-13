@@ -343,3 +343,24 @@ async def test_concurrent_ensure_subscribed_resumes_once() -> None:
 
     assert sorted(results) == [False, True]
     assert [c[0] for c in client.calls] == ["thread/resume"]
+
+
+async def test_client_not_running_after_websocket_reader_stops() -> None:
+    """A closed connection must look dead so the next request restarts it."""
+    from unittest.mock import MagicMock
+
+    client = codex_remote.CodexAppServerClient(command="codex")
+    client._proc = MagicMock(returncode=None)
+    client._ws = MagicMock()
+
+    async def _forever() -> None:
+        await asyncio.Event().wait()
+
+    reader = asyncio.create_task(_forever())
+    client._ws_reader_task = reader
+    await asyncio.sleep(0)
+    assert client.is_running
+
+    reader.cancel()
+    await asyncio.gather(reader, return_exceptions=True)
+    assert not client.is_running
