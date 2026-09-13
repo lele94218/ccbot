@@ -1197,20 +1197,44 @@ class SessionManager:
     async def _send_to_codex_window(
         self, window_id: str, text: str
     ) -> tuple[bool, str]:
-        """Hybrid input for Codex windows: tmux TUI first, app-server fallback."""
+        """Hybrid input for Codex windows: tmux TUI first, app-server fallback.
+
+        First makes sure ccbot's own app-server connection is subscribed to
+        the thread.  app-server only pushes a thread's events to connections
+        that started or resumed it, so after a ccbot or app-server restart the
+        replies to TUI-typed input would otherwise reach only the TUI.
+        """
         from .codex_remote import codex_remote_manager
 
         display = self.get_display_name(window_id)
         state = self.get_window_state(window_id)
+        thread_id = state.session_id
+        if is_codex_window_id(window_id):
+            thread_id = thread_id or codex_thread_id_from_window_id(window_id)
+        if not thread_id:
+            return False, "Missing Codex thread id for bound window"
+
+        generation_before = codex_remote_manager.client.generation
+        try:
+            await codex_remote_manager.ensure_subscribed(thread_id, state.cwd)
+        except Exception as e:
+            logger.exception("Failed to subscribe to Codex thread %s", thread_id)
+            reason = (
+                "Could not subscribe to the Codex thread, so replies would not "
+                f"reach Telegram: {e}"
+            )
+            return False, reason
+        # If app-server was restarted just now, TUIs are being relaunched on
+        # the new server and typing into one that is still booting can be
+        # lost, so this message goes through app-server instead.
+        app_server_restarted = (
+            codex_remote_manager.client.generation != generation_before
+        )
+
         if state.pending_model or state.pending_effort:
             # A model/effort chosen from Telegram is applied by sending this
             # message through app-server with overrides; the thread persists
             # them for later turns, including ones typed into the TUI.
-            thread_id = state.session_id
-            if is_codex_window_id(window_id):
-                thread_id = thread_id or codex_thread_id_from_window_id(window_id)
-            if not thread_id:
-                return False, "Missing Codex thread id for bound window"
             model, effort = state.pending_model, state.pending_effort
             logger.info(
                 "send_to_window: codex window_id=%s (%s) via app-server with "
@@ -1229,7 +1253,7 @@ class SessionManager:
                 self._save_state()
             return ok, msg
 
-        if not is_codex_window_id(window_id):
+        if not is_codex_window_id(window_id) and not app_server_restarted:
             window = await tmux_manager.find_window_by_id(window_id)
             if window and not is_codex_tui_command(window.pane_current_command):
                 # The TUI exited (or never started): typing into a bare shell
@@ -1254,12 +1278,12 @@ class SessionManager:
                     "tmux send failed for Codex window %s; falling back to app-server",
                     window_id,
                 )
+        elif app_server_restarted:
+            logger.info(
+                "Codex app-server restarted during send; sending to %s via app-server",
+                window_id,
+            )
 
-        thread_id = state.session_id
-        if is_codex_window_id(window_id):
-            thread_id = thread_id or codex_thread_id_from_window_id(window_id)
-        if not thread_id:
-            return False, "Missing Codex thread id for bound window"
         logger.debug(
             "send_to_window: codex window_id=%s (%s) via app-server, text_len=%d",
             window_id,

@@ -1031,7 +1031,13 @@ _CODEX_TUI_COMMANDS = CODEX_TUI_COMMANDS
 
 
 async def _restore_codex_remote_windows() -> None:
-    """Reattach or recreate tmux-hosted Codex TUIs after bot restart."""
+    """Resubscribe to Codex threads and reattach their tmux TUIs.
+
+    Runs at startup and whenever app-server restarts mid-run.  Each bound
+    thread is first resumed on ccbot's own app-server connection, because
+    app-server only pushes a thread's replies to subscribed connections;
+    without this, replies to TUI-typed input never reach Telegram.
+    """
     live_windows = await tmux_manager.list_windows()
     windows = {w.window_id: w for w in live_windows}
     windows_by_name = {w.window_name: w for w in live_windows}
@@ -1052,6 +1058,13 @@ async def _restore_codex_remote_windows() -> None:
             codex_thread_id = codex_thread_id or codex_thread_id_from_window_id(wid)
         if not codex_thread_id:
             continue
+
+        try:
+            await codex_remote_manager.ensure_subscribed(codex_thread_id, state.cwd)
+        except Exception:
+            logger.exception(
+                "Failed to subscribe ccbot to Codex thread %s", codex_thread_id
+            )
 
         display_name = (
             session_manager.get_display_name(wid)
@@ -2628,6 +2641,7 @@ async def post_init(application: Application) -> None:
             await handle_new_message(msg, application.bot, AGENT_CODEX)
 
         codex_remote_manager.set_message_callback(codex_message_callback)
+        codex_remote_manager.set_restart_callback(_restore_codex_remote_windows)
         await codex_remote_manager.start()
         logger.info("Codex remote app-server started")
         await _restore_codex_remote_windows()

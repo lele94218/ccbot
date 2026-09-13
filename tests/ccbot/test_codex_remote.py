@@ -2,6 +2,7 @@
 
 import asyncio
 import shlex
+from pathlib import Path
 
 from ccbot import codex_remote
 from ccbot.codex_remote import (
@@ -272,3 +273,73 @@ async def test_turn_notifications_track_active_turn() -> None:
         }
     )
     assert "thread1" not in manager._active_turn_ids
+
+
+class FakeSubscribingClient(FakeCodexClient):
+    """Fake client with the generation/start surface ensure_subscribed uses."""
+
+    def __init__(self, result=None) -> None:
+        super().__init__(result)
+        self.generation = 1
+        self.is_running = True
+        self.starts = 0
+
+    async def start(self) -> None:
+        self.starts += 1
+        self.is_running = True
+        self.generation += 1
+
+
+async def test_ensure_subscribed_resumes_once_per_generation() -> None:
+    manager = CodexRemoteManager()
+    client = FakeSubscribingClient()
+    manager.client = client  # type: ignore[assignment]
+
+    assert await manager.ensure_subscribed("t1", "/tmp") is True
+    assert await manager.ensure_subscribed("t1", "/tmp") is False
+    assert [c[0] for c in client.calls] == ["thread/resume"]
+    params = client.calls[0][1]
+    assert params["threadId"] == "t1"
+    assert params["cwd"] == str(Path("/tmp").resolve())
+    assert "model" not in params  # keep the model chosen in the thread
+
+    client.generation += 1  # new app-server: old subscriptions are gone
+    assert await manager.ensure_subscribed("t1") is True
+    assert "cwd" not in client.calls[-1][1]
+    assert len(client.calls) == 2
+
+
+async def test_create_thread_marks_thread_subscribed() -> None:
+    manager = CodexRemoteManager()
+    client = FakeSubscribingClient(result={"thread": {"id": "t9", "cwd": "/tmp"}})
+    manager.client = client  # type: ignore[assignment]
+
+    await manager.create_thread("/tmp")
+
+    assert manager.is_subscribed("t9")
+    assert await manager.ensure_subscribed("t9") is False
+    assert [c[0] for c in client.calls] == ["thread/start"]
+
+
+async def test_ensure_subscribed_starts_stopped_client() -> None:
+    manager = CodexRemoteManager()
+    client = FakeSubscribingClient()
+    client.is_running = False
+    manager.client = client  # type: ignore[assignment]
+
+    assert await manager.ensure_subscribed("t1") is True
+    assert client.starts == 1
+    assert [c[0] for c in client.calls] == ["thread/resume"]
+
+
+async def test_concurrent_ensure_subscribed_resumes_once() -> None:
+    manager = CodexRemoteManager()
+    client = FakeSubscribingClient()
+    manager.client = client  # type: ignore[assignment]
+
+    results = await asyncio.gather(
+        manager.ensure_subscribed("t1"), manager.ensure_subscribed("t1")
+    )
+
+    assert sorted(results) == [False, True]
+    assert [c[0] for c in client.calls] == ["thread/resume"]

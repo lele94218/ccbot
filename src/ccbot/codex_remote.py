@@ -114,6 +114,11 @@ class CodexAppServerClient:
         self._notification_callback: (
             Callable[[dict[str, Any]], Awaitable[None]] | None
         ) = None
+        # Incremented on every successful start.  A new generation means a new
+        # app-server process: every thread subscription is gone and tmux TUIs
+        # still point at the old URL.
+        self.generation = 0
+        self._restart_callback: Callable[[], Awaitable[None]] | None = None
 
     def set_notification_callback(
         self, callback: Callable[[dict[str, Any]], Awaitable[None]]
@@ -135,7 +140,13 @@ class CodexAppServerClient:
         return self._remote_url
 
     async def start(self) -> None:
-        """Start app-server and perform protocol initialization."""
+        """Start app-server and perform protocol initialization.
+
+        When this is a restart (app-server died and a request started a new
+        one), the restart callback runs after startup so ccbot can reattach
+        TUIs to the new URL and resubscribe to threads.
+        """
+        restarted = False
         if self.is_running:
             return
 
@@ -213,6 +224,19 @@ class CodexAppServerClient:
             except Exception:
                 await self.stop()
                 raise
+
+            self.generation += 1
+            restarted = self.generation > 1
+
+        if restarted and self._restart_callback:
+            logger.warning(
+                "Codex app-server restarted (generation %d); restoring Codex windows",
+                self.generation,
+            )
+            try:
+                await self._restart_callback()
+            except Exception:
+                logger.exception("Codex app-server restart callback failed")
 
     async def stop(self) -> None:
         """Stop app-server and cancel background readers."""
@@ -403,12 +427,68 @@ class CodexRemoteManager:
         self._started_tool_ids: set[tuple[str, str]] = set()
         self._pending_tools: dict[tuple[str, str], PendingToolInfo] = {}
         self._active_turn_ids: dict[str, str] = {}
+        # Threads this connection is subscribed to (started or resumed by us).
+        # app-server only pushes a thread's notifications to subscribed
+        # connections, so a thread driven purely from the tmux TUI is silent
+        # to ccbot until we resume it here.  Reset per client generation.
+        self._subscribed: set[str] = set()
+        self._subscribed_generation = -1
+        self._subscribe_locks: dict[str, asyncio.Lock] = {}
 
     def set_message_callback(
         self, callback: Callable[[NewMessage], Awaitable[None]]
     ) -> None:
         """Set callback for converted Codex messages."""
         self._message_callback = callback
+
+    def set_restart_callback(self, callback: Callable[[], Awaitable[None]]) -> None:
+        """Run ``callback`` whenever app-server is restarted mid-run."""
+        self.client._restart_callback = callback
+
+    def _sync_subscriptions(self) -> None:
+        """Forget subscriptions that belonged to a previous app-server."""
+        if self._subscribed_generation != self.client.generation:
+            self._subscribed.clear()
+            self._subscribed_generation = self.client.generation
+
+    def is_subscribed(self, thread_id: str) -> bool:
+        """Return True if this connection receives the thread's notifications."""
+        self._sync_subscriptions()
+        return thread_id in self._subscribed
+
+    def _mark_subscribed(self, thread_id: str) -> None:
+        self._sync_subscriptions()
+        self._subscribed.add(thread_id)
+
+    async def ensure_subscribed(self, thread_id: str, cwd: str = "") -> bool:
+        """Make sure ccbot receives notifications for ``thread_id``.
+
+        Resumes the thread on ccbot's own connection if needed (for a thread
+        already running in a TUI, app-server simply adds us as a subscriber).
+        No model is passed, so a model chosen in the thread is kept.
+        Returns True if a resume was performed.  Raises on failure.
+        """
+        if not thread_id:
+            raise RuntimeError("Missing Codex thread id")
+        if not self.client.is_running:
+            await self.client.start()
+        if self.is_subscribed(thread_id):
+            return False
+        lock = self._subscribe_locks.setdefault(thread_id, asyncio.Lock())
+        async with lock:
+            if self.is_subscribed(thread_id):
+                return False
+            params: dict[str, Any] = {
+                "threadId": thread_id,
+                "approvalPolicy": self._approval_policy(),
+                "sandbox": self._sandbox(),
+            }
+            if cwd:
+                params["cwd"] = str(Path(cwd).expanduser().resolve())
+            await self.client.request("thread/resume", params, timeout=60.0)
+            self._mark_subscribed(thread_id)
+        logger.info("Subscribed ccbot to Codex thread %s", thread_id)
+        return True
 
     async def start(self) -> None:
         self.client.set_notification_callback(self._handle_notification)
@@ -534,6 +614,7 @@ class CodexRemoteManager:
         thread_id = str(thread.get("id", ""))
         if not thread_id:
             raise RuntimeError("Codex app-server returned an empty thread id")
+        self._mark_subscribed(thread_id)
         name = thread.get("name") or thread.get("preview") or Path(path).name
         return CodexThread(
             thread_id=thread_id,

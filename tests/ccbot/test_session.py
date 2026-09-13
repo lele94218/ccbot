@@ -261,6 +261,17 @@ class TestIsWindowId:
 class TestCodexHybridInput:
     """Codex windows type into the tmux TUI when it exists, else use app-server."""
 
+    @pytest.fixture(autouse=True)
+    def _subscription(self, monkeypatch):
+        from ccbot import codex_remote
+
+        self.ensure_subscribed = AsyncMock(return_value=False)
+        monkeypatch.setattr(
+            codex_remote.codex_remote_manager,
+            "ensure_subscribed",
+            self.ensure_subscribed,
+        )
+
     def _codex_window(self, mgr: SessionManager, window_id: str = "@7") -> None:
         mgr.window_states[window_id] = WindowState(
             agent=AGENT_CODEX,
@@ -442,3 +453,87 @@ class TestCodexHybridInput:
         assert WindowState.from_dict(ws.to_dict()) == ws
         plain = WindowState(agent=AGENT_CODEX, session_id="t")
         assert "pending_model" not in plain.to_dict()
+
+    async def test_subscribes_before_typing_into_tui(
+        self, monkeypatch, mgr: SessionManager
+    ) -> None:
+        self._codex_window(mgr)
+        order: list[str] = []
+        self.ensure_subscribed.side_effect = lambda *a, **k: order.append("sub")
+        window = AsyncMock()
+        window.window_id = "@7"
+        window.pane_current_command = "node"
+
+        async def send_keys(*_a, **_k):
+            order.append("keys")
+            return True
+
+        monkeypatch.setattr(
+            session_module.tmux_manager,
+            "find_window_by_id",
+            AsyncMock(return_value=window),
+        )
+        monkeypatch.setattr(session_module.tmux_manager, "send_keys", send_keys)
+
+        ok, _ = await mgr.send_to_window("@7", "hello")
+
+        assert ok
+        assert order == ["sub", "keys"]
+        self.ensure_subscribed.assert_awaited_once_with(
+            "019e459d-c98d-7223-85b5-de7c290f859e", "/tmp/project"
+        )
+
+    async def test_subscription_failure_reports_and_sends_nothing(
+        self, monkeypatch, mgr: SessionManager
+    ) -> None:
+        self._codex_window(mgr)
+        self.ensure_subscribed.side_effect = RuntimeError("boom")
+        send_keys = AsyncMock(return_value=True)
+        send_to_thread = AsyncMock(return_value=(True, "api"))
+        monkeypatch.setattr(session_module.tmux_manager, "send_keys", send_keys)
+        from ccbot import codex_remote
+
+        monkeypatch.setattr(
+            codex_remote.codex_remote_manager, "send_to_thread", send_to_thread
+        )
+
+        ok, msg = await mgr.send_to_window("@7", "hello")
+
+        assert not ok
+        assert "subscribe" in msg and "boom" in msg
+        send_keys.assert_not_awaited()
+        send_to_thread.assert_not_awaited()
+
+    async def test_app_server_restart_during_send_uses_app_server(
+        self, monkeypatch, mgr: SessionManager
+    ) -> None:
+        """TUIs are relaunching on the new server; don't type into them."""
+        self._codex_window(mgr)
+        from ccbot import codex_remote
+
+        client = codex_remote.codex_remote_manager.client
+        monkeypatch.setattr(client, "generation", 3)
+
+        def restart(*_a, **_k):
+            client.generation = 4
+
+        self.ensure_subscribed.side_effect = restart
+        window = AsyncMock()
+        window.window_id = "@7"
+        window.pane_current_command = "node"
+        send_keys = AsyncMock(return_value=True)
+        send_to_thread = AsyncMock(return_value=(True, "api"))
+        monkeypatch.setattr(
+            session_module.tmux_manager,
+            "find_window_by_id",
+            AsyncMock(return_value=window),
+        )
+        monkeypatch.setattr(session_module.tmux_manager, "send_keys", send_keys)
+        monkeypatch.setattr(
+            codex_remote.codex_remote_manager, "send_to_thread", send_to_thread
+        )
+
+        ok, msg = await mgr.send_to_window("@7", "hello")
+
+        assert (ok, msg) == (True, "api")
+        send_keys.assert_not_awaited()
