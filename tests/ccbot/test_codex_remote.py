@@ -115,14 +115,17 @@ def test_build_tui_command_uses_remote_resume(tmp_path) -> None:
     command = manager.build_tui_command("thread-1", str(tmp_path))
     parts = shlex.split(command)
 
-    assert parts[:5] == [
+    # No permission override: Codex rejects those when attaching to a thread
+    # that lives on an app-server.
+    assert parts[:4] == [
         "codex",
         "-c",
         "check_for_update_on_startup=false",
-        "--dangerously-bypass-approvals-and-sandbox",
         "resume",
     ]
-    assert parts[5] == "thread-1"
+    assert parts[4] == "thread-1"
+    assert "--dangerously-bypass-approvals-and-sandbox" not in parts
+    assert "--model" not in parts
     assert "--remote" in parts
     assert parts[parts.index("--remote") + 1] == "ws://127.0.0.1:12345"
     assert "--cd" in parts
@@ -132,7 +135,7 @@ def test_build_tui_command_uses_remote_resume(tmp_path) -> None:
     assert "--sandbox" not in parts
 
 
-def test_build_tui_command_can_use_explicit_policy(monkeypatch, tmp_path) -> None:
+def test_build_tui_command_never_passes_permission_flags(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(codex_remote.config, "codex_disable_update_check", False)
     monkeypatch.setattr(
         codex_remote.config,
@@ -149,11 +152,13 @@ def test_build_tui_command_can_use_explicit_policy(monkeypatch, tmp_path) -> Non
     command = manager.build_tui_command("thread-1", str(tmp_path))
     parts = shlex.split(command)
 
+    # Approval policy and sandbox reach the thread through thread/start and
+    # thread/resume params, never as CLI overrides on the attach command.
     assert parts[:3] == ["codex", "resume", "thread-1"]
     assert "--dangerously-bypass-approvals-and-sandbox" not in parts
     assert "-c" not in parts
-    assert parts[parts.index("--ask-for-approval") + 1] == "on-request"
-    assert parts[parts.index("--sandbox") + 1] == "read-only"
+    assert "--ask-for-approval" not in parts
+    assert "--sandbox" not in parts
 
 
 async def test_wait_until_resumable_waits_for_session_file(
@@ -364,3 +369,17 @@ async def test_client_not_running_after_websocket_reader_stops() -> None:
     reader.cancel()
     await asyncio.gather(reader, return_exceptions=True)
     assert not client.is_running
+
+
+def test_build_tui_command_omits_model_override(monkeypatch, tmp_path) -> None:
+    """A configured model must not be passed to a remote attach either."""
+    monkeypatch.setattr(codex_remote.config, "codex_model", "gpt-6-astra")
+
+    manager = CodexRemoteManager()
+    manager.client.command = "codex"
+    manager.client._remote_url = "ws://127.0.0.1:12345"
+
+    parts = shlex.split(manager.build_tui_command("thread-1", str(tmp_path)))
+
+    assert "--model" not in parts
+    assert "gpt-6-astra" not in parts

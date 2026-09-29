@@ -556,14 +556,22 @@ class CodexRemoteManager:
         return config.codex_sandbox
 
     @staticmethod
-    def _codex_command_parts(command: str) -> list[str]:
-        """Return Codex command parts with automation-safe global overrides."""
+    def _codex_command_parts(
+        command: str, *, permission_flags: bool = True
+    ) -> list[str]:
+        """Return Codex command parts with automation-safe global overrides.
+
+        ``permission_flags=False`` omits the approval/sandbox override, which
+        Codex rejects when attaching to a thread on an app-server ("Permission
+        overrides are not supported when resuming a remote task"): the thread
+        already carries the policy it was started or resumed with.
+        """
         parts = shlex.split(command)
         if not parts:
             raise RuntimeError("CODEX_COMMAND is empty")
         if config.codex_disable_update_check:
             parts.extend(["-c", CODEX_UPDATE_CHECK_CONFIG])
-        if config.codex_dangerously_bypass_approvals_and_sandbox:
+        if permission_flags and config.codex_dangerously_bypass_approvals_and_sandbox:
             parts.append(CODEX_DANGEROUS_BYPASS_FLAG)
         return parts
 
@@ -573,7 +581,11 @@ class CodexRemoteManager:
         if not remote_url:
             raise RuntimeError("Codex app-server has not exposed a remote URL")
 
-        parts = self._codex_command_parts(self.client.command)
+        # Attaching to a thread on the app-server takes no permission or model
+        # overrides: Codex rejects the whole command with "Permission overrides
+        # are not supported when resuming a remote task", and the thread already
+        # carries the approval policy, sandbox and model it was started with.
+        parts = self._codex_command_parts(self.client.command, permission_flags=False)
         parts.extend(
             [
                 "resume",
@@ -585,17 +597,6 @@ class CodexRemoteManager:
                 "--no-alt-screen",
             ]
         )
-        if not config.codex_dangerously_bypass_approvals_and_sandbox:
-            parts.extend(
-                [
-                    "--ask-for-approval",
-                    config.codex_approval_policy,
-                    "--sandbox",
-                    config.codex_sandbox,
-                ]
-            )
-        if config.codex_model:
-            parts.extend(["--model", config.codex_model])
         return shlex.join(parts)
 
     async def create_thread(
