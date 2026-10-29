@@ -3,6 +3,8 @@
 [English README](README.md)
 [中文文档](README_CN.md)
 
+> Fork of [six-ddc/ccbot](https://github.com/six-ddc/ccbot) with Codex support. Upstream fixes are merged in periodically.
+
 Удалённое управление сессиями Claude Code и Codex через Telegram — мониторинг, интерактивное управление и работа с AI-сессиями в tmux.
 
 https://github.com/user-attachments/assets/15ffb38e-5eb9-4720-93b9-412e4961dc93
@@ -46,16 +48,16 @@ CCBot позволяет **бесшовно продолжать ту же са�
 
 ```bash
 # Через uv (рекомендуется)
-uv tool install git+https://github.com/six-ddc/ccmux.git
+uv tool install git+https://github.com/lele94218/ccbot.git
 
 # Или через pipx
-pipx install git+https://github.com/six-ddc/ccmux.git
+pipx install git+https://github.com/lele94218/ccbot.git
 ```
 
 ### Вариант 2: установка из исходников
 
 ```bash
-git clone https://github.com/six-ddc/ccmux.git
+git clone https://github.com/lele94218/ccbot.git
 cd ccmux
 uv sync
 ```

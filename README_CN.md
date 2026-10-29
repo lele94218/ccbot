@@ -1,5 +1,7 @@
 # CCBot
 
+> 本仓库 fork 自 [six-ddc/ccbot](https://github.com/six-ddc/ccbot)，增加了 Codex 支持，并定期合并上游修复。
+
 通过 Telegram 远程控制 Claude Code 和 Codex 会话 — 监控、交互、管理运行在 tmux 中的 AI 编程会话。
 
 https://github.com/user-attachments/assets/15ffb38e-5eb9-4720-93b9-412e4961dc93
@@ -45,16 +47,16 @@ CCBot 让你**通过 Telegram 无缝接管同一个会话**。核心设计思路
 
 ```bash
 # 使用 uv（推荐）
-uv tool install git+https://github.com/six-ddc/ccmux.git
+uv tool install git+https://github.com/lele94218/ccbot.git
 
 # 或使用 pipx
-pipx install git+https://github.com/six-ddc/ccmux.git
+pipx install git+https://github.com/lele94218/ccbot.git
 ```
 
 ### 方式二：从源码安装
 
 ```bash
-git clone https://github.com/six-ddc/ccmux.git
+git clone https://github.com/lele94218/ccbot.git
 cd ccmux
 uv sync
 ```
