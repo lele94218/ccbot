@@ -441,7 +441,7 @@ class TranscriptParser:
         elif tool_name == "Write":
             # Write: line count comes from the input content, not the result
             # (result is usually just "File created successfully at: ...")
-            written = tool_input_data.get("content", "") if tool_input_data else text
+            written = tool_input_data.get("content", "") if tool_input_data else ""
             if not written:
                 written_lines = 0
             else:
