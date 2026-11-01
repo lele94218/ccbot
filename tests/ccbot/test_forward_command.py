@@ -159,7 +159,7 @@ class TestForwardCommandCodex:
 
     @pytest.mark.asyncio
     async def test_model_direct_args_sets_override(self):
-        """/model gpt-5.5 low on a Codex topic → override stored, nothing typed."""
+        """/model gpt-5.5 low on a Codex topic → applied via app-server, nothing typed."""
         from ccbot.codex_remote import CodexModel
 
         update = _make_update("/model gpt-5.5 low")
@@ -181,15 +181,14 @@ class TestForwardCommandCodex:
         ):
             mock_sm.resolve_window_for_thread.return_value = "@5"
             mock_sm.send_to_window = AsyncMock()
+            mock_sm.apply_codex_model = AsyncMock(return_value=True)
             mock_codex.list_models = AsyncMock(return_value=models)
 
             from ccbot.bot import forward_command_handler
 
             await forward_command_handler(update, context)
 
-            mock_sm.set_codex_model_override.assert_called_once_with(
-                "@5", "gpt-5.5", "low"
-            )
+            mock_sm.apply_codex_model.assert_awaited_once_with("@5", "gpt-5.5", "low")
             mock_sm.send_to_window.assert_not_called()
             assert "gpt-5.5 low" in mock_reply.call_args.args[1]
 

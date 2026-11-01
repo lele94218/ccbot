@@ -41,8 +41,6 @@ def build_model_picker(
                 )
             ]
         )
-    lines.append("")
-    lines.append("Applies from your next message in this topic.")
     buttons.append(
         [InlineKeyboardButton("Cancel", callback_data=CB_CODEX_MODEL_CANCEL)]
     )
@@ -98,7 +96,12 @@ def parse_model_args(args: str, models: list[CodexModel]) -> tuple[str, str, str
     return match.id, effort, ""
 
 
-def format_model_choice(model_id: str, effort: str) -> str:
-    """Confirmation text after a choice is stored."""
+def format_model_choice(model_id: str, effort: str, applied_now: bool = True) -> str:
+    """Confirmation text after a choice is applied (or stored for later)."""
     detail = f"{model_id} {effort}".strip()
-    return f"✅ Codex model set to *{detail}*.\nApplies from your next message in this topic."
+    if applied_now:
+        return f"✅ Codex model set to *{detail}*."
+    return (
+        f"✅ Codex model set to *{detail}*.\n"
+        "Applies from your next message in this topic."
+    )

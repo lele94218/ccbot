@@ -722,3 +722,68 @@ class TestLoadSessionMapMigration:
 
         await mgr.load_session_map()
         assert mgr.get_window_state("@4").session_id == "sid-1"
+
+
+class TestApplyCodexModel:
+    """/model applies via thread/settings/update now, else waits for next message."""
+
+    THREAD = "019e459d-c98d-7223-85b5-de7c290f859e"
+
+    def _codex_window(self, mgr: SessionManager) -> None:
+        mgr.window_states["@7"] = WindowState(
+            agent=AGENT_CODEX, session_id=self.THREAD, cwd="/tmp/project"
+        )
+
+    async def test_applies_immediately(self, monkeypatch, mgr: SessionManager) -> None:
+        from ccbot import codex_remote
+
+        self._codex_window(mgr)
+        mgr.set_codex_model_override("@7", "stale", "low")
+        update = AsyncMock()
+        monkeypatch.setattr(
+            codex_remote.codex_remote_manager, "update_thread_settings", update
+        )
+
+        applied = await mgr.apply_codex_model("@7", "gpt-6-luna", "high")
+
+        assert applied is True
+        update.assert_awaited_once_with(
+            self.THREAD, "/tmp/project", model="gpt-6-luna", effort="high"
+        )
+        # Nothing left to replay on the next message
+        assert mgr.get_window_state("@7").pending_model == ""
+        assert mgr.get_window_state("@7").pending_effort == ""
+
+    async def test_falls_back_to_pending_on_failure(
+        self, monkeypatch, mgr: SessionManager
+    ) -> None:
+        from ccbot import codex_remote
+
+        self._codex_window(mgr)
+        monkeypatch.setattr(
+            codex_remote.codex_remote_manager,
+            "update_thread_settings",
+            AsyncMock(side_effect=RuntimeError("method not found")),
+        )
+
+        applied = await mgr.apply_codex_model("@7", "gpt-6-luna", "high")
+
+        assert applied is False
+        state = mgr.get_window_state("@7")
+        assert (state.pending_model, state.pending_effort) == ("gpt-6-luna", "high")
+
+    async def test_update_request_omits_empty_effort(self, monkeypatch) -> None:
+        from ccbot import codex_remote
+
+        mgr_ = codex_remote.codex_remote_manager
+        monkeypatch.setattr(mgr_, "ensure_subscribed", AsyncMock(return_value=False))
+        request = AsyncMock(return_value={})
+        monkeypatch.setattr(mgr_.client, "request", request)
+
+        await mgr_.update_thread_settings(self.THREAD, "", model="m", effort=None)
+
+        request.assert_awaited_once_with(
+            "thread/settings/update",
+            {"threadId": self.THREAD, "model": "m"},
+            timeout=30.0,
+        )

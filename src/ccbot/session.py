@@ -1413,6 +1413,48 @@ class SessionManager:
         )
         return await codex_remote_manager.send_to_thread(thread_id, text)
 
+    async def apply_codex_model(
+        self, window_id: str, model: str, effort: str = ""
+    ) -> bool:
+        """Switch a Codex window's model/effort now; fall back to next message.
+
+        Returns True when app-server applied it immediately.  Otherwise the
+        choice is stored as a pending override that rides on the next message
+        sent from Telegram (see send_to_window).
+        """
+        from .codex_remote import codex_remote_manager
+
+        state = self.get_window_state(window_id)
+        thread_id = state.session_id
+        if is_codex_window_id(window_id):
+            thread_id = thread_id or codex_thread_id_from_window_id(window_id)
+        if thread_id:
+            try:
+                await codex_remote_manager.update_thread_settings(
+                    thread_id, state.cwd, model=model or None, effort=effort or None
+                )
+            except Exception as e:
+                logger.warning(
+                    "thread/settings/update failed for %s, deferring to next "
+                    "message: %s",
+                    window_id,
+                    e,
+                )
+            else:
+                logger.info(
+                    "Applied Codex settings to %s now: model=%r effort=%r",
+                    window_id,
+                    model,
+                    effort,
+                )
+                if state.pending_model or state.pending_effort:
+                    state.pending_model = ""
+                    state.pending_effort = ""
+                    self._save_state()
+                return True
+        self.set_codex_model_override(window_id, model, effort)
+        return False
+
     def set_codex_model_override(
         self, window_id: str, model: str, effort: str = ""
     ) -> None:

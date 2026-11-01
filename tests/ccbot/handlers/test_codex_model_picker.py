@@ -4,6 +4,7 @@ from ccbot.codex_remote import CodexModel
 from ccbot.handlers.codex_model_picker import (
     build_effort_picker,
     build_model_picker,
+    format_model_choice,
     parse_model_args,
 )
 
@@ -24,7 +25,7 @@ def test_model_picker_buttons_and_callback_data():
         "cm:cancel",
     ]
     assert rows[1][0].text.startswith("● ")  # current model marked
-    assert "(default)" in text and "next message" in text
+    assert "(default)" in text
     assert all(len(b.callback_data.encode()) <= 64 for r in rows for b in r)
 
 
@@ -43,3 +44,8 @@ def test_parse_model_args():
     assert "Unknown effort" in parse_model_args("gpt-6-astra ultra", MODELS)[2]
     # A model without an advertised effort list accepts any effort.
     assert parse_model_args("gpt-5.5 low", MODELS) == ("gpt-5.5", "low", "")
+
+
+def test_format_model_choice_mentions_deferral_only_when_not_applied():
+    assert "next message" not in format_model_choice("gpt-5.5", "low")
+    assert "next message" in format_model_choice("gpt-5.5", "low", applied_now=False)

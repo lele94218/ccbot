@@ -727,8 +727,8 @@ async def _codex_model_command(
         if error:
             await safe_reply(update.message, f"❌ {error}")
             return
-        session_manager.set_codex_model_override(wid, model_id, effort)
-        await safe_reply(update.message, format_model_choice(model_id, effort))
+        applied = await session_manager.apply_codex_model(wid, model_id, effort)
+        await safe_reply(update.message, format_model_choice(model_id, effort, applied))
         return
 
     if context.user_data is not None:
@@ -1870,10 +1870,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             if not wid:
                 await query.answer("No session bound to this topic", show_alert=True)
                 return
-            session_manager.set_codex_model_override(wid, model.id, "")
+            applied = await session_manager.apply_codex_model(wid, model.id, "")
             if context.user_data is not None:
                 context.user_data.pop(MODEL_PICK_MODELS_KEY, None)
-            await safe_edit(query, format_model_choice(model.id, ""))
+            await safe_edit(query, format_model_choice(model.id, "", applied))
             await query.answer(model.display_name)
             return
         if context.user_data is not None:
@@ -1899,11 +1899,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if not wid:
             await query.answer("No session bound to this topic", show_alert=True)
             return
-        session_manager.set_codex_model_override(wid, model.id, effort)
+        applied = await session_manager.apply_codex_model(wid, model.id, effort)
         if context.user_data is not None:
             context.user_data.pop(MODEL_PICK_MODELS_KEY, None)
             context.user_data.pop(MODEL_PICK_MODEL_KEY, None)
-        await safe_edit(query, format_model_choice(model.id, effort))
+        await safe_edit(query, format_model_choice(model.id, effort, applied))
         await query.answer(f"{model.display_name} {effort}")
 
     elif data == CB_CODEX_MODEL_CANCEL:

@@ -673,6 +673,29 @@ class CodexRemoteManager:
             return False, str(e)
         return True, f"Sent to Codex thread {thread_id}"
 
+    async def update_thread_settings(
+        self,
+        thread_id: str,
+        cwd: str = "",
+        *,
+        model: str | None = None,
+        effort: str | None = None,
+    ) -> None:
+        """Change the model/effort for the thread's subsequent turns right away.
+
+        Uses the experimental ``thread/settings/update`` request (ccbot opts
+        into the experimental API at initialize).  App-server broadcasts
+        ``thread/settings/updated`` so an attached TUI switches too, and turns
+        typed into the TUI use the new settings.  Raises on failure.
+        """
+        await self.ensure_subscribed(thread_id, cwd)
+        params: dict[str, Any] = {"threadId": thread_id}
+        if model:
+            params["model"] = model
+        if effort:
+            params["effort"] = effort
+        await self.client.request("thread/settings/update", params, timeout=30.0)
+
     async def list_models(self, *, include_hidden: bool = False) -> list[CodexModel]:
         """Return the models app-server advertises for the picker."""
         models: list[CodexModel] = []
